@@ -73,7 +73,7 @@ class OllamaLLM(BaseChatModel):
             ollama_message['images'] = images
         
         ollama_messages.append(ollama_message)
-‘        
+    
         ollama_messages=[
             {
                 'role': 'user',
