@@ -17,6 +17,11 @@ llm_config = {
     'max_tokens': 2048
 }
 
+llm_config_2 = {
+    'model': 'qwen:latest',
+    'temperature': 0.1,
+    'max_tokens': 2048
+}
 
 # 自定义LLM类，包装ollama的调用
 class OllamaLLM(BaseChatModel):
@@ -32,47 +37,60 @@ class OllamaLLM(BaseChatModel):
     def _chat_no_stream(self, messages, **kwargs):
         # 转换qwen-agent的消息格式为ollama的消息格式
         ollama_messages = []
-        content_text = ''
-        images = []
         
         # 处理消息内容
         for message in messages:
+            # 确保消息是Message对象格式
             if isinstance(message, dict):
-                role = message.get('role', '')
+                role = message.get('role', 'user')
                 content = message.get('content', '')
-            elif hasattr(message, 'role') and hasattr(message, 'content'):
+            elif isinstance(message, Message):
                 role = message.role
                 content = message.content
             else:
-                continue
+                # 如果是字符串或其他类型，创建一个新的Message对象
+                role = 'user'
+                content = str(message)
+            
+            # 处理内容
+            content_text = ''
+            images = []
             
             if isinstance(content, list):
+                # 处理ContentItem列表
                 for item in content:
                     if isinstance(item, ContentItem):
                         if item.text:
                             content_text += item.text + '\n'
                         if item.image:
                             # 检查是否为base64编码
-                            if item.image.startswith('data:image/'):
-                                # 对于base64编码的图像，我们保留它
+                            if isinstance(item.image, str) and item.image.startswith('data:image/'):
                                 images.append(item.image)
-                            else:
-                                # 对于文件路径，我们直接使用
+                            elif isinstance(item.image, str):
+                                # 文件路径，直接使用
                                 images.append(item.image)
+                    elif isinstance(item, dict):
+                        # 处理字典格式的内容
+                        if 'text' in item:
+                            content_text += item['text'] + '\n'
+                        if 'image' in item:
+                            images.append(item['image'])
+            elif isinstance(content, str):
+                content_text = content
             else:
-                content_text += str(content) + '\n'
-        
-        # 构建ollama消息
-        ollama_message = {
-            'role': 'user',
-            'content': content_text.strip(),
-        }
-        
-        # 如果有图像，添加到消息中
-        if images:
-            ollama_message['images'] = images
-        
-        ollama_messages.append(ollama_message)
+                content_text = str(content)
+            
+            # 构建ollama消息
+            ollama_message = {
+                'role': role,
+                'content': content_text.strip(),
+            }
+            
+            # 如果有图像，添加到消息中
+            if images:
+                ollama_message['images'] = images
+            
+            ollama_messages.append(ollama_message)
         
         try:
             # 调用本地ollama服务
@@ -98,10 +116,23 @@ class OllamaLLM(BaseChatModel):
     def _chat_stream(self, messages, **kwargs):
         # 简单实现流式响应，返回非流式响应的生成器
         response = self._chat_no_stream(messages, **kwargs)
-        # 确保yield的是列表形式的Message对象
-        if not isinstance(response, list):
-            response = [response]
-        yield response
+        # 确保返回的是Message对象
+        if isinstance(response, Message):
+            yield [response]
+        elif isinstance(response, list):
+            # 确保列表中的每个元素都是Message对象
+            valid_messages = []
+            for msg in response:
+                if isinstance(msg, Message):
+                    valid_messages.append(msg)
+                elif isinstance(msg, dict) and 'role' in msg and 'content' in msg:
+                    valid_messages.append(Message(role=msg['role'], content=msg['content']))
+                else:
+                    valid_messages.append(Message(role='assistant', content=str(msg)))
+            yield valid_messages
+        else:
+            # 如果返回的是其他类型，包装成Message对象
+            yield [Message(role='assistant', content=str(response))]
         
     def _chat_with_functions(self, messages, functions, **kwargs):
         # 实现带函数调用的聊天
@@ -111,32 +142,31 @@ class OllamaLLM(BaseChatModel):
         # 创建新的消息列表，添加函数信息
         messages_with_functions = copy.deepcopy(messages)
         
-        # 在最后一条用户消息中添加函数信息
-        if messages_with_functions and len(messages_with_functions) > 0:
-            last_msg = messages_with_functions[-1]
-            if hasattr(last_msg, 'role'):
-                role = last_msg.role
+        # 确保所有消息都是Message对象
+        valid_messages = []
+        for msg in messages_with_functions:
+            if isinstance(msg, Message):
+                valid_messages.append(msg)
+            elif isinstance(msg, dict):
+                valid_messages.append(Message(role=msg.get('role', 'user'), content=msg.get('content', '')))
             else:
-                role = last_msg.get('role', '')
-                
-            if role == 'user':
-                if hasattr(last_msg, 'content'):
-                    content = last_msg.content
-                else:
-                    content = last_msg.get('content', '')
-                    
+                valid_messages.append(Message(role='user', content=str(msg)))
+        
+        # 在最后一条用户消息中添加函数信息
+        if valid_messages and len(valid_messages) > 0:
+            last_msg = valid_messages[-1]
+            if last_msg.role == 'user':
+                content = last_msg.content
                 if isinstance(content, str):
-                    if hasattr(last_msg, 'content'):
-                        last_msg.content += '\n\n' + functions_info
-                    else:
-                        last_msg['content'] += '\n\n' + functions_info
+                    last_msg.content = content + '\n\n' + functions_info
                 elif isinstance(content, list):
                     # 如果是ContentItem列表，添加一个新的文本项
-                    if content and isinstance(content[0], ContentItem):
-                        content.append(ContentItem(text=functions_info))
+                    content.append(ContentItem(text=functions_info))
+                else:
+                    last_msg.content = str(content) + '\n\n' + functions_info
         
         # 调用普通聊天方法
-        return self._chat_no_stream(messages_with_functions, **kwargs)
+        return self._chat_no_stream(valid_messages, **kwargs)
 
 
 class Visual_solve_equations(Agent):
@@ -160,65 +190,118 @@ class Visual_solve_equations(Agent):
 
     def _run(self, messages: List[Message],
              lang: str = 'zh', **kwargs) -> Iterator[List[Message]]:
-        # 校验WebUI传入的参数，必须为list，且包含图片
-        assert isinstance(messages[-1]['content'], list)
-        assert any([item.image for item in messages[-1]
-                   ['content']]), '这个智体应用需要输入图片'
+        # 确保消息格式正确
+        if not messages:
+            yield [Message(role='assistant', content='没有收到消息')]
+            return
+            
+        # 获取最后一条消息
+        last_message = messages[-1]
+        
+        # 确保最后一条消息有正确的格式
+        if not isinstance(last_message, Message):
+            yield [Message(role='assistant', content='消息格式不正确')]
+            return
+            
+        # 检查消息内容格式
+        content = last_message.content
+        if not isinstance(content, list):
+            yield [Message(role='assistant', content='消息内容格式不正确')]
+            return
+            
+        # 检查是否包含图片
+        has_image = False
+        for item in content:
+            if isinstance(item, ContentItem) and item.image:
+                has_image = True
+                break
+            elif isinstance(item, dict) and 'image' in item:
+                has_image = True
+                break
+                
+        if not has_image:
+            yield [Message(role='assistant', content='这个智体应用需要输入图片')]
+            return
 
         response = []
         # 第1个Agent，将图片内容识别成文本
         new_messages = copy.deepcopy(messages)
-        input_text = new_messages[-1].content[0]['text']
-        input_image = new_messages[-1].content[1]['image']
+        
+        # 安全地获取输入文本和图像
+        input_text = "请识别图片中的数学方程式并转换为文本格式"
+        input_image = ""
+        
+        # 从消息内容中提取文本和图像
+        for item in content:
+            if isinstance(item, ContentItem):
+                if item.text and item.text.strip():
+                    input_text = item.text
+                if item.image:
+                    input_image = item.image
+            elif isinstance(item, dict):
+                if 'text' in item and item['text'] and item['text'].strip():
+                    input_text = item['text']
+                if 'image' in item:
+                    input_image = item['image']
         
         print(f'输入文本: {input_text}')
         print(f'图像路径: {input_image}')
 
         # 将图像路径从file://格式转换为本地路径
-        image_path = input_image.replace('file://', '')
+        image_path = str(input_image).replace('file://', '')
         
-        # 我们已经在文件顶部导入了这些模块
         # 确保图像路径正确，并转换为base64编码格式
-        # try:
-        #     # 检查图像文件是否存在
-        #     if os.path.exists(image_path):
-        #         # 将图像转换为base64编码
-        #         base64_image = encode_image_as_base64(image_path)
-        #         print(f'图像已成功转换为base64编码')
-        #     else:
-        #         print(f'警告：图像文件不存在: {image_path}')
-        #         base64_image = image_path
-        # except Exception as e:
-        #     print(f'转换图像时出错: {str(e)}')
-        #     base64_image = image_path
+        try:
+            # 检查图像文件是否存在
+            if os.path.exists(image_path):
+                # 将图像转换为base64编码
+                base64_image = encode_image_as_base64(image_path)
+                print(f'图像已成功转换为base64编码')
+            else:
+                print(f'警告：图像文件不存在: {image_path}')
+                base64_image = image_path
+        except Exception as e:
+            print(f'转换图像时出错: {str(e)}')
+            base64_image = image_path
         
-        base64_image = image_path
-        
-        # 创建包含文本和编码后图像的内容列表
-        new_messages[-1].content = [
-            ContentItem(text=input_text),
-            ContentItem(image=base64_image)
-        ]
+        # 创建包含文本和编码后图像的新消息
+        image_message = Message(
+            role='user',
+            content=[
+                ContentItem(text=input_text),
+                ContentItem(image=base64_image)
+            ]
+        )
         
         # 使用image_agent识别图片中的数学问题
-        for rsp in self.image_agent.run(new_messages, lang=lang, **kwargs):
+        image_messages = new_messages[:-1] + [image_message]
+        
+        for rsp in self.image_agent.run(image_messages, lang=lang, **kwargs):
             print(f'图像识别结果: {rsp}')
             yield rsp
         
         # 第2个Agent，求解文本中的数学问题
-        response = rsp
-        new_messages.extend(rsp)
-        new_messages.append(Message('user', '根据以上文本内容求解数学题'))
-        
-        for rsp in self.math_agent.run(new_messages, lang=lang, **kwargs):
-            print(f'数学计算结果: {rsp}')
-            yield response + rsp
+        if rsp and len(rsp) > 0:
+            # 获取识别结果
+            recognition_result = rsp[-1].content if isinstance(rsp[-1].content, str) else str(rsp[-1].content)
+            
+            # 创建新的消息用于数学计算
+            math_message = Message(
+                role='user',
+                content=f"请根据以下内容求解数学问题：{recognition_result}"
+            )
+            
+            math_messages = new_messages[:-1] + [math_message]
+            
+            for math_rsp in self.math_agent.run(math_messages, lang=lang, **kwargs):
+                print(f'数学计算结果: {math_rsp}')
+                yield math_rsp
 
 
 def app_gui():
     bot = Visual_solve_equations(llm=llm_config)
     WebUI(bot).run(
-        server_name="192.168.31.119",
+        server_name="192.168.31.122",
         server_port=7861
     )
 
