@@ -1,0 +1,19 @@
+transformers
+accelerate
+tiktoken
+einops
+transformers_stream_generator
+scipy
+torchvision
+pillow
+tensorboard
+matplotlib
+fastapi
+uvicorn
+openai
+pydantic
+sse_starlette
+dotenv
+qwen-agent[gui]
+# pip install --force-reinstall pandas
+ollama
